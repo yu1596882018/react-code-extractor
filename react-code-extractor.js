@@ -487,7 +487,7 @@ class ReactCodeExtractor {
         });
 
         // 保持原有格式
-        const { code } = babelGenerator(ast, { comments: true, retainLines: true, compact: false, concise: false });
+        const { code } = babelGenerator(ast, { comments: true, compact: false, concise: false });
         return code;
     }
 
