@@ -390,15 +390,6 @@ class ReactCodeExtractor {
 
     // 应用tree-shaking
     applyTreeShaking(filePath, content) {
-        const usedExports = this.usedExports.get(filePath);
-        // 只对utils目录下的js/ts文件做tree-shaking
-        if (!usedExports || usedExports.size === 0 || !/util/i.test(filePath) || !/\.(js|ts)x?$/.test(filePath)) {
-            return content; // 没有使用记录或不是utils，保留原文件
-        }
-        
-        console.log(`🌳 对 ${filePath} 应用tree-shaking，使用的导出: ${Array.from(usedExports).join(', ')}`);
-        
-        // 解析AST
         let ast;
         try {
             ast = babelParser.parse(content, {
@@ -410,36 +401,93 @@ class ReactCodeExtractor {
             return content;
         }
 
-        // 过滤导出声明，只保留被用到的
-        ast.program.body = ast.program.body.filter(node => {
-            // export function/const/class ...
-            if (node.type === 'ExportNamedDeclaration' && node.declaration) {
-                const decl = node.declaration;
-                if (decl.type === 'FunctionDeclaration' || decl.type === 'ClassDeclaration' || decl.type === 'VariableDeclaration') {
-                    // 变量声明可能有多个
-                    if (decl.type === 'VariableDeclaration') {
-                        decl.declarations = decl.declarations.filter(d => usedExports.has(d.id.name));
-                        return decl.declarations.length > 0;
-                    }
-                    return usedExports.has(decl.id && decl.id.name);
+        // 获取本文件实际被用到的导出
+        const usedExports = this.usedExports && this.usedExports.get(filePath);
+
+        // 收集所有声明
+        const declared = new Map();
+        babelTraverse(ast, {
+            FunctionDeclaration(path) {
+                if (path.node.id) declared.set(path.node.id.name, path);
+            },
+            VariableDeclarator(path) {
+                if (path.node.id && path.node.id.name) declared.set(path.node.id.name, path.parentPath);
+            },
+            ClassDeclaration(path) {
+                if (path.node.id) declared.set(path.node.id.name, path);
+            }
+        });
+
+        // 收集所有被用到的标识符（包括 export、调用、引用等）
+        const used = new Set();
+        // 只保留被实际用到的 export
+        if (usedExports && usedExports.size > 0) {
+            usedExports.forEach(name => used.add(name));
+        }
+        // 还要收集所有被调用/引用的标识符
+        babelTraverse(ast, {
+            Identifier(path) {
+                // 跳过声明本身
+                if (
+                    path.parent.type === 'FunctionDeclaration' ||
+                    path.parent.type === 'VariableDeclarator' ||
+                    path.parent.type === 'ClassDeclaration'
+                ) return;
+                used.add(path.node.name);
+            }
+        });
+
+        // 递归收集依赖
+        let changed;
+        do {
+            changed = false;
+            for (const name of Array.from(used)) {
+                if (declared.has(name)) {
+                    declared.get(name).traverse({
+                        Identifier(innerPath) {
+                            if (
+                                innerPath.parent.type === 'FunctionDeclaration' ||
+                                innerPath.parent.type === 'VariableDeclarator' ||
+                                innerPath.parent.type === 'ClassDeclaration'
+                            ) return;
+                            if (!used.has(innerPath.node.name)) {
+                                used.add(innerPath.node.name);
+                                changed = true;
+                            }
+                        }
+                    });
                 }
             }
-            // export { foo, bar }
-            if (node.type === 'ExportNamedDeclaration' && node.specifiers && node.specifiers.length > 0) {
-                node.specifiers = node.specifiers.filter(s => usedExports.has(s.exported.name));
-                return node.specifiers.length > 0;
+        } while (changed);
+
+        // 移除未被用到的声明和未被用到的 export
+        ast.program.body = ast.program.body.filter(node => {
+            if (node.type === 'FunctionDeclaration' && node.id && !used.has(node.id.name)) return false;
+            if (node.type === 'ClassDeclaration' && node.id && !used.has(node.id.name)) return false;
+            if (node.type === 'VariableDeclaration') {
+                node.declarations = node.declarations.filter(d => used.has(d.id.name));
+                return node.declarations.length > 0;
             }
-            // export default ...
-            if (node.type === 'ExportDefaultDeclaration') {
-                // 默认导出暂时保留
-                return true;
+            // 移除未被用到的 export
+            if (node.type === 'ExportNamedDeclaration') {
+                if (node.declaration && node.declaration.id && !used.has(node.declaration.id.name)) return false;
+                if (node.declaration && node.declaration.declarations) {
+                    node.declaration.declarations = node.declaration.declarations.filter(d => used.has(d.id.name));
+                    if (node.declaration.declarations.length === 0) return false;
+                }
+                if (node.specifiers) {
+                    node.specifiers = node.specifiers.filter(s => used.has(s.exported.name));
+                    if (node.specifiers.length === 0 && !node.declaration) return false;
+                }
             }
-            // 其它保留
+            if (node.type === 'ExportDefaultDeclaration' && node.declaration && node.declaration.name && !used.has(node.declaration.name)) {
+                return false;
+            }
             return true;
         });
 
-        // 生成新代码
-        const { code } = babelGenerator(ast, { comments: true });
+        // 保持原有格式
+        const { code } = babelGenerator(ast, { comments: true, retainLines: true, compact: false, concise: false });
         return code;
     }
 
