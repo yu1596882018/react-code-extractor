@@ -1,6 +1,6 @@
 {
   "name": "react-code-extractor",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "repository": "https://github.com/yu1596882018/react-code-extractor.git",
   "description": "智能提取React项目中的页面和组件代码",
   "main": "react-code-extractor.js",
